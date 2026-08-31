@@ -16,6 +16,7 @@ Contents
 - Report framing and validation
 - Vendor initialization command sequences
 - Button bit layout mapping
+- Button classification for virtual-controller output routing
 - Timing constants (debounce, reconnect delays)
 - Cross-validation with config schema
 """
@@ -130,6 +131,36 @@ ALL_BUTTONS: frozenset[str] = frozenset(
 _unmappable = set(MAPPABLE_BUTTONS) - ALL_BUTTONS
 if _unmappable:
     raise RuntimeError(f"MAPPABLE_BUTTONS references undecodable button(s): {_unmappable}")
+
+# ── Virtual-controller output routing ─────────────────────────────────────────
+# The Vader 5 Pro exposes a native XInput/DirectInput gamepad interface
+# (Interface 0) that Windows and games already see without any involvement
+# from this app. STANDARD_BUTTONS lists the 17 logical buttons that
+# interface already delivers. VENDOR_ONLY_BUTTONS — everything else in
+# MAPPABLE_BUTTONS — has no native representation at all and only ever
+# reaches the host through the vendor stream this app decodes.
+#
+# service/mapping/mapper.py uses this split to decide which *unmapped*
+# buttons are safe to forward to a virtual controller (see
+# service/mapping/virtual_controller.py) without producing a duplicate
+# press: forwarding a VENDOR_ONLY_BUTTONS entry can never duplicate
+# anything, since nothing else on the system reports it. HOME is confirmed
+# as a normal gamepad button (observed as B16 on a gamepad tester), so it
+# is classified as standard rather than vendor-only.
+STANDARD_BUTTONS: frozenset[str] = frozenset({
+    "A", "B", "X", "Y",
+    "UP", "DOWN", "LEFT", "RIGHT",
+    "LB", "RB", "LT", "RT",
+    "LS", "RS",
+    "SELECT", "START",
+    "HOME",
+})
+
+_invalid_standard = STANDARD_BUTTONS - set(MAPPABLE_BUTTONS)
+if _invalid_standard:
+    raise RuntimeError(f"STANDARD_BUTTONS references unknown button(s): {_invalid_standard}")
+
+VENDOR_ONLY_BUTTONS: frozenset[str] = frozenset(MAPPABLE_BUTTONS) - STANDARD_BUTTONS
 
 # How long (seconds) a button's raw HID bit must hold its new state
 # before it's treated as a real press/release rather than contact

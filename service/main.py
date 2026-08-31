@@ -91,6 +91,7 @@ from service.hid_interface.rawinput_reader import RawInputReaderThread
 from service.mapping.input_sender import InputSender
 from service.mapping.macro_player import MacroPlayer
 from service.mapping.mapper import ButtonMapper
+from service.mapping.virtual_controller import VirtualController
 from service.automation.hotkey_watcher import HotkeyWatcherThread
 from service.automation.foreground_watcher import ForegroundWatcherThread
 from service.tray import TrayIcon
@@ -129,8 +130,11 @@ def main() -> None:
     settings = cfg.load_settings()
 
     sender = InputSender()
-    macro_player = MacroPlayer()
-    mapper = ButtonMapper(sender, macro_player)
+    virtual_controller = VirtualController(
+        enabled=bool(settings.get("virtual_controller_enabled", True))
+    )
+    macro_player = MacroPlayer(virtual_controller=virtual_controller)
+    mapper = ButtonMapper(sender, macro_player, virtual_controller=virtual_controller)
 
     status_writer.write(connected=False)  # dongle enumeration visible in the GUI immediately, even before pairing
 
@@ -295,6 +299,7 @@ def main() -> None:
         reader.stop()
         hotkey_watcher.stop()
         foreground_watcher.stop()
+        virtual_controller.close()
         icon_holder["icon"].stop()
 
     icon = TrayIcon(
@@ -317,6 +322,7 @@ def main() -> None:
         reader.stop()
         hotkey_watcher.stop()
         foreground_watcher.stop()
+        virtual_controller.close()
         reader.join(timeout=2.0)
 
 

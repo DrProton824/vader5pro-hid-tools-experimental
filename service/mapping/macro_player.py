@@ -1,5 +1,5 @@
 # service/mapping/macro_player.py
-# Macro playback via Win32 SendInput scancodes.
+# Macro playback via Win32 SendInput scancodes and/or the virtual controller.
 #
 
 """
@@ -20,12 +20,21 @@ true when macros.py determined at capture time that it needs this.
 Regular letters, digits, symbols, F-keys, and left-side modifiers are
 unaffected and still replay exactly as before.
 
-Stuck-key safety net
-─────────────────────
+Controller actions
+───────────────────
+"controller_down" / "controller_up" carry a button name in the same
+"key" field keyboard actions already use, and are routed to
+VirtualController.press()/release() instead of SendInput. A macro's
+action list can freely mix keyboard and controller actions — each
+action's own "type" decides where it goes.
+
+Stuck-key / stuck-button safety net
+─────────────────────────────────────
 If playback stops mid-sequence (exception, a future cancel path, ...)
-while a key is still logically "held," that key is force-released in
-`finally` — otherwise it can end up physically stuck down system-wide
-until the user happens to tap that exact key themselves.
+while a key or controller button is still logically "held," it is
+force-released in `finally` — otherwise a key can end up physically
+stuck down system-wide (or a controller button stuck pressed) until the
+user happens to tap that exact key/button themselves.
 
 Threading
 ─────────
@@ -49,10 +58,11 @@ from __future__ import annotations
 import ctypes
 import threading
 import time
-from typing import Any
+from typing import Any, Optional
 
 from .input_sender import INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_EXTENDEDKEY
 from .extended_keys import ALWAYS_EXTENDED, NAV_CLUSTER
+from .virtual_controller import VirtualController
 
 KEYEVENTF_SCANCODE = 0x0008
 
@@ -86,14 +96,21 @@ class MacroPlayer:
     """
     Usage
     ─────
-        player = MacroPlayer()
+        player = MacroPlayer(virtual_controller=virtual_controller)
         player.play(binding["actions"])   # returns immediately
+
+    `virtual_controller` is optional — omit it (or pass None) to keep the
+    keyboard-only behaviour from before this class supported controller
+    actions. Any "controller_down"/"controller_up" action in a macro is
+    then simply skipped, the same way an unrecognized action type already
+    was.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, virtual_controller: Optional[VirtualController] = None) -> None:
         self._active = 0
         self._active_macros: set[int] = set()
         self._lock = threading.Lock()
+        self._controller = virtual_controller
 
     def play(self, actions: list[dict[str, Any]]) -> None:
         if not actions:
@@ -110,6 +127,7 @@ class MacroPlayer:
 
     def _run(self, actions: list[dict[str, Any]], macro_id: int) -> None:
         held: list[tuple[int, bool]] = []  # scan codes currently held: [(scan_code, extended), ...]
+        held_controller: list[str] = []    # controller button names currently held
         try:
             for action in actions[:MAX_MACRO_ACTIONS]:
                 kind = action.get("type")
@@ -118,6 +136,19 @@ class MacroPlayer:
                     ms = action.get("ms", 0)
                     if isinstance(ms, (int, float)) and ms > 0:
                         time.sleep(min(ms, MAX_WAIT_MS) / 1000)
+                    continue
+
+                if kind in ("controller_down", "controller_up"):
+                    target = action.get("key", "")
+                    if target and self._controller is not None:
+                        if kind == "controller_down":
+                            self._controller.press(target)
+                            if target not in held_controller:
+                                held_controller.append(target)
+                        else:
+                            self._controller.release(target)
+                            if target in held_controller:
+                                held_controller.remove(target)
                     continue
 
                 if kind not in ("press", "release"):
@@ -143,6 +174,9 @@ class MacroPlayer:
             for scan_code, extended in reversed(held):
                 inp = _make_scancode_input(scan_code, key_up=True, extended=extended)
                 _SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+            if self._controller is not None:
+                for target in reversed(held_controller):
+                    self._controller.release(target)
             with self._lock:
                 self._active -= 1
                 self._active_macros.discard(macro_id)

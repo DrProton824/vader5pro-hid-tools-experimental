@@ -8,25 +8,42 @@ Schema
 ──────
   {
     "active_profile": "<id>",
-    "profiles": [{"id", "name", "mapping": {button: {"type": "keybind"|"macro", "value": "..."}}, "automation", "hotkey"}],
+    "profiles": [{"id", "name", "mapping": {button: {"type": <binding type>, ...}}, "automation", "hotkey"}],
     "macros":   [{"name", "actions": [...]}],
-    "settings": {"vendor_initialization", "autostart", "close_to_tray"}
+    "settings": {
+        "vendor_initialization", "autostart", "close_to_tray",
+        "virtual_controller_enabled", "virtual_controller_mode"
+    }
   }
+
+  Binding types stored per button in a profile's "mapping":
+    "keybind"           {"type": "keybind", "value": "<shortcut string>"}
+    "macro"             {"type": "macro", "value": "<macro name>"}
+    "controller_button" {"type": "controller_button", "value": "<target button name>"}
+    "controller_macro"  {"type": "controller_macro", "value": "<macro name>"}
+    "combo"             {"type": "combo", "actions": [<sub-action dict>, ...]}
+
+  "controller_button"/"controller_macro" route through a virtual controller
+  (see service/mapping/virtual_controller.py) instead of/alongside keyboard
+  output. "combo" is accepted by the schema but not yet dispatched by
+  ButtonMapper — reserved for a future phase, see docs/HIDMAESTRO_INTEGRATION_PLAN.md.
 
 Reading
 ───────
 load_config() returns the full config, migrating a legacy/incomplete file on read.
 load() returns only the active profile's keybind assignments as a flat {button: shortcut}
-dict — macro assignments resolve to "" since they aren't directly playable by InputSender.
-load_bindings() returns the full active profile assignments including resolved macro action
-lists, for callers (ButtonMapper) that need both types.
+dict — every other binding type resolves to "" since it isn't directly playable by
+InputSender. load_bindings() returns the full active profile assignments including
+resolved macro action lists and controller targets, for callers (ButtonMapper) that
+need every binding type.
 
 Migration
 ─────────
 _migrate() handles: backfilling profile ids, guaranteeing a Default profile always
-exists, repairing a dangling active_profile pointer, and folding a pre-migration flat
-{"M1": "f13", ...} config into the profile schema. Runs transparently on read;
-migrated data is written back immediately.
+exists, repairing a dangling active_profile pointer, folding a pre-migration flat
+{"M1": "f13", ...} config into the profile schema, and backfilling any settings key
+added since the file was last written (see DEFAULT_SETTINGS). Runs transparently on
+read; migrated data is written back immediately.
 
 Writing
 ───────
@@ -97,6 +114,18 @@ DEFAULT_SETTINGS: Settings = {
     "vendor_initialization": True,
     "autostart": False,
     "close_to_tray": True,
+    # Whether the service attempts to start the HMBridge virtual-controller
+    # process at all. False keeps the app in its pre-virtual-controller
+    # behaviour even if HMBridge.exe is present. See
+    # service/mapping/virtual_controller.py.
+    "virtual_controller_enabled": True,
+    # "hybrid" — vendor-only buttons without an explicit mapping are
+    # forwarded to the virtual controller automatically; standard buttons
+    # (already visible through the native gamepad interface) are left
+    # alone. "full" is reserved for a later phase that suppresses the
+    # native interface and routes everything through the virtual
+    # controller instead — not implemented yet.
+    "virtual_controller_mode": "hybrid",
 }
 
 DEFAULT_CONFIG: ConfigData = {
@@ -132,8 +161,9 @@ def _atomic_write(text: str) -> None:
 def _migrate(data: ConfigData) -> bool:
     """
     Backfill profile ids, guarantee a Default profile, repair a dangling
-    active_profile, and fold a pre-migration flat {"M1": "f13", ...}
-    config into a fresh Default profile. Returns True if data changed.
+    active_profile, fold a pre-migration flat {"M1": "f13", ...} config
+    into a fresh Default profile, and backfill any settings key added
+    since the file was last written. Returns True if data changed.
     """
     changed = False
 
@@ -198,10 +228,10 @@ def save_config(data: ConfigData) -> None:
 def load() -> Mapping:
     """
     Return the active profile's mapping as a flat {button: shortcut} dict.
-    Macro-type assignments resolve to "" (unmapped) — kept for anything
-    that only wants keybinds (e.g. InputSender.update_mappings). Services
-    that also need to play macros should use load_bindings() instead.
-    Never raises.
+    Every binding type other than "keybind" resolves to "" (unmapped) —
+    kept for anything that only wants keybinds (e.g. InputSender.update_mappings).
+    Services that also need macros or controller output should use
+    load_bindings() instead. Never raises.
     """
     try:
         data = load_config()
@@ -218,7 +248,7 @@ def load() -> Mapping:
         if isinstance(assignment, dict) and assignment.get("type") == "keybind":
             mapping[button] = str(assignment.get("value", ""))
         else:
-            mapping[button] = ""  # unmapped, or a macro — see load_bindings()
+            mapping[button] = ""  # unmapped, or a non-keybind type — see load_bindings()
     return mapping
 
 
@@ -232,6 +262,19 @@ def load_bindings_for(profile_id: str) -> dict[str, Binding]:
     (see service/main.py) to apply a profile's bindings temporarily without
     persisting it as the user's chosen active profile, so it can be cleanly
     reverted once the linked program loses focus. Never raises.
+
+    Resolves every binding type the schema supports:
+      "keybind"           -> {"type": "keybind", "value": "<shortcut>"}
+      "macro"              -> {"type": "macro", "actions": [<recorded actions>]}
+      "controller_button"  -> {"type": "controller_button", "value": "<target button>"}
+      "controller_macro"   -> {"type": "controller_macro", "actions": [<recorded actions>]}
+      "combo"               -> {"type": "combo", "actions": [<sub-action dict>, ...]}
+
+    Macro names (both "macro" and "controller_macro") are resolved against
+    the top-level "macros" list — a macro's actions can freely mix keyboard
+    and controller action types, ButtonMapper/MacroPlayer decide per-action
+    where each one goes. A button with a macro assignment pointing at a
+    since-deleted or since-renamed macro resolves to an empty action list.
     """
     try:
         data = load_config()
@@ -250,6 +293,13 @@ def load_bindings_for(profile_id: str) -> dict[str, Binding]:
         if kind == "macro":
             actions = macros_by_name.get(str(assignment.get("value", "")), [])
             bindings[button] = {"type": "macro", "actions": actions}
+        elif kind == "controller_macro":
+            actions = macros_by_name.get(str(assignment.get("value", "")), [])
+            bindings[button] = {"type": "controller_macro", "actions": actions}
+        elif kind == "controller_button":
+            bindings[button] = {"type": "controller_button", "value": str(assignment.get("value", ""))}
+        elif kind == "combo":
+            bindings[button] = {"type": "combo", "actions": assignment.get("actions", [])}
         elif kind == "keybind":
             bindings[button] = {"type": "keybind", "value": str(assignment.get("value", ""))}
         else:
@@ -260,15 +310,8 @@ def load_bindings_for(profile_id: str) -> dict[str, Binding]:
 
 def load_bindings() -> dict[str, Binding]:
     """
-    Return the active profile's mapping resolved to executable bindings:
-
-        {button: {"type": "keybind", "value": "<shortcut>"}}
-        {button: {"type": "macro", "actions": [<recorded actions>]}}
-
-    Macro names are resolved against the top-level "macros" list here, so
-    callers (ButtonMapper) never need to know the config schema — a
-    button with a macro assignment pointing at a since-deleted or
-    since-renamed macro just resolves to an empty action list. Never
+    Return the active profile's mapping resolved to executable bindings —
+    see load_bindings_for() for the full set of binding shapes. Never
     raises.
     """
     try:

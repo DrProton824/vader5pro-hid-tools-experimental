@@ -439,6 +439,9 @@ class Macros(CTkScript):
     def _describe_action(action: Dict[str, Any]) -> str:
         if action["type"] == "wait":
             return f"wait {action['ms']}ms"
+        if action["type"] in ("controller_down", "controller_up"):
+            verb = "controller down" if action["type"] == "controller_down" else "controller up"
+            return f"{verb} {action.get('key', '?')}"
         key_display = action.get("key", f"scan:{action.get('scan_code', '?')}")
         return f"{action['type']} {key_display}"
 

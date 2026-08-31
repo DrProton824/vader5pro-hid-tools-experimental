@@ -31,6 +31,15 @@ Excluded modules
 ────────────────
 legacy_hid_reader is excluded from the service build — it's a reference
 implementation only, replaced by rawinput_reader.RawInputReaderThread.
+
+Bridge bundling (optional)
+───────────────────────────
+If a pre-built HMBridge.exe is available (see bridge/README.md and
+.github/workflows/build.yml's build_bridge job), copy_bridge_exe() bundles
+it into dist/VaderMapper/bridge/. This step is best-effort: a build
+without HMBridge.exe still produces a fully working app, just one where
+VirtualController.is_available stays False at runtime. See
+service/mapping/virtual_controller.py.
 """
 
 from __future__ import annotations
@@ -161,6 +170,39 @@ def copy_runtime_files() -> None:
         shutil.copytree(GUI_ASSETS, dest_assets, dirs_exist_ok=True)
 
 
+def copy_bridge_exe() -> None:
+    """Bundle a pre-built HMBridge.exe into dist/VaderMapper/bridge/, if
+    one is available. Checked in order:
+
+      1. HMBRIDGE_EXE_PATH env var — set by .github/workflows/build.yml's
+         build_bridge job when it downloads the artifact produced there.
+      2. bridge/HMBridge/bin/**/HMBridge.exe — a local `dotnet build` or
+         `dotnet publish` output, for building from source.
+
+    Best-effort and entirely optional: see the "Bridge bundling" section
+    of this file's module docstring.
+    """
+    candidates: list[Path] = []
+
+    override = os.environ.get("HMBRIDGE_EXE_PATH")
+    if override:
+        candidates.append(Path(override))
+
+    bridge_bin = ROOT / "bridge" / "HMBridge" / "bin"
+    if bridge_bin.exists():
+        candidates.extend(sorted(bridge_bin.rglob("HMBridge.exe")))
+
+    for candidate in candidates:
+        if candidate.is_file():
+            dest_dir = DIST / "bridge"
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(candidate, dest_dir / "HMBridge.exe")
+            print(f"Bundled HMBridge.exe from {candidate}")
+            return
+
+    print("HMBridge.exe not found -- packaging without virtual-controller support.")
+
+
 def main() -> None:
     version = _get_version()
     print(f"Building version: {version}")
@@ -170,6 +212,7 @@ def main() -> None:
         build_service()
         build_config_gui()
         copy_runtime_files()
+        copy_bridge_exe()
         archive_path = package_release(version)
     finally:
         # Always restore, even if the build fails, so a local build
