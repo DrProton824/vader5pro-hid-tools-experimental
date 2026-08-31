@@ -1,0 +1,140 @@
+name: Build Windows Executables
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version number for this build (e.g. 1.2.0)"
+        required: true
+        default: "0.1.0"
+        type: string
+
+      publish:
+        description: "Publish GitHub Release"
+        required: true
+        default: false
+        type: boolean
+
+      build_bridge:
+        description: "Also build HMBridge.exe (virtual-controller support) and bundle it"
+        required: true
+        default: true
+        type: boolean
+
+      hidmaestro_ref:
+        description: "HIDMaestro branch/tag/commit to build the bridge against"
+        required: true
+        default: "master"
+        type: string
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────
+  # Optional: build HMBridge.exe, the small process that talks to the
+  # HIDMaestro SDK. Runs on windows-2022 specifically (not windows-latest)
+  # because that image ships with WDK 10.0.26100.0 preinstalled alongside
+  # full Visual Studio 2022 — the exact combination HIDMaestro's own build
+  # scripts expect, so no separate WDK/EWDK download is needed here.
+  #
+  # This job is intentionally decoupled from the main build: if it's
+  # skipped or fails, `build` still runs and produces a fully working app
+  # — just one without virtual-controller output. See
+  # service/mapping/virtual_controller.py.
+  # ──────────────────────────────────────────────────────────────────────
+  build_bridge:
+    if: ${{ inputs.build_bridge }}
+    runs-on: windows-2022
+    continue-on-error: true
+    steps:
+      - name: Checkout vader5pro-hid-tools
+        uses: actions/checkout@v4
+
+      - name: Checkout HIDMaestro
+        uses: actions/checkout@v4
+        with:
+          repository: hifihedgehog/HIDMaestro
+          ref: ${{ inputs.hidmaestro_ref }}
+          path: third_party/HIDMaestro
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Confirm WDK 10.0.26100.0 is present on this runner
+        shell: cmd
+        run: |
+          if not exist "C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\km\wdm.h" (
+            echo WDK 10.0.26100.0 headers not found on this runner image.
+            echo See bridge/README.md's "If the preinstalled WDK disappears" section.
+            exit /b 1
+          )
+          echo Found WDK 10.0.26100.0 headers.
+
+      - name: Build HIDMaestro native driver + SDK
+        shell: cmd
+        working-directory: third_party/HIDMaestro
+        run: scripts\build_all.cmd
+
+      - name: Publish HMBridge.exe
+        shell: cmd
+        run: dotnet publish bridge\HMBridge\HMBridge.csproj -c Release -o publish
+
+      - name: Upload HMBridge.exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HMBridge
+          path: publish/HMBridge.exe
+          if-no-files-found: error
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Main app build — unchanged from before, plus an optional step that
+  # pulls in the HMBridge.exe artifact from the job above (if it ran and
+  # succeeded) before packaging.
+  # ──────────────────────────────────────────────────────────────────────
+  build:
+    needs: build_bridge
+    if: ${{ always() }}
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller hidapi ctkmaker-core==5.5.1 pillow keyboard
+
+      - name: Download HMBridge.exe artifact
+        if: ${{ inputs.build_bridge && needs.build_bridge.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: HMBridge
+          path: bridge-download
+
+      - name: Build executables
+        env:
+          BUILD_VERSION: ${{ inputs.version }}
+          HMBRIDGE_EXE_PATH: ${{ (inputs.build_bridge && needs.build_bridge.result == 'success') && 'bridge-download/HMBridge.exe' || '' }}
+        run: python build/build.py
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: VaderMapper-v${{ inputs.version }}
+          path: dist/VaderMapper/
+
+      - name: Create release
+        if: ${{ inputs.publish }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          files: dist/VaderMapper-v${{ inputs.version }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
