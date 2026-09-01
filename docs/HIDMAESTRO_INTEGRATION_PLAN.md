@@ -11,6 +11,28 @@ New functionality is exposed either automatically (no assignment needed)
 or through the existing macro system, which already accepts arbitrary
 action dicts. No new widgets, tabs, or fields are added anywhere.
 
+## Since the last version of this bundle
+
+The transport between the Python service and `HMBridge.exe` changed from
+a plain subprocess stdin/stdout pipe to a named pipe with the bridge
+launched elevated via `ShellExecuteEx("runas")`. Reason: HIDMaestro's
+`CreateController()` requires an elevated caller on *every* run, not just
+once for driver install, and a UAC elevation always spawns a brand new
+process — there's no way to hand that new process an existing
+unelevated process's stdio pipes. `VaderService.exe` itself stays
+unelevated either way; only the small `HMBridge.exe` child gets the UAC
+prompt, once per service launch. See `bridge/README.md`'s "Elevation"
+section for the full explanation, and `service/mapping/virtual_controller.py`'s
+module docstring for the implementation details. Every other file in this
+bundle is unaffected — `ButtonMapper`/`MacroPlayer`/`service/main.py` all
+call the same `VirtualController` public API as before
+(`press`/`release`/`is_available`/`close`/...), so none of them needed to
+change.
+
+Also fixed: `bridge/HMBridge/HMBridge.csproj` had an XML comment
+containing a bare `--`, which is illegal inside `<!-- -->` and broke the
+build. Fixed in this bundle.
+
 ## Merged against v1.2
 
 This revision of the bundle is re-merged against your v1.2 source
@@ -99,7 +121,8 @@ artifact the main app build already produces. One workflow run, one
 download.
 
 Files: `bridge/HMBridge/HMBridge.csproj`, `bridge/HMBridge/Program.cs`,
-`bridge/README.md`, `.github/workflows/build.yml`, `build/build.py`.
+`bridge/HMBridge/app.manifest`, `bridge/README.md`,
+`.github/workflows/build.yml`, `build/build.py`.
 
 ### Why a subprocess and not pythonnet
 

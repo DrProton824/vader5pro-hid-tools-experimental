@@ -17,6 +17,7 @@ service/main.py
 gui/scripts/macros.py
 bridge/HMBridge/HMBridge.csproj         ← new file
 bridge/HMBridge/Program.cs              ← new file
+bridge/HMBridge/app.manifest            ← new file
 bridge/README.md                        ← new file
 build/build.py
 .github/workflows/build.yml
@@ -62,29 +63,39 @@ what's preinstalled on its runner images).
 
 ## 4. Try it
 
-Run the downloaded build. Press M1, M2, M3, M4, LM, RM, C, Z, Arrow, or
-Circle on the controller and check `joy.cpl` (or any gamepad tester) for
-a new "Vader 5 Pro Extended" device reacting. Nothing needs to be assigned
-in the GUI for this — vendor-only buttons forward automatically.
+Restart `VaderService.exe`. Within a moment you should see **one UAC
+prompt** for `HMBridge.exe` — accept it. This happens once per service
+launch (HIDMaestro's `CreateController()` requires elevation every
+session, not just for the initial driver install — see `bridge/README.md`'s
+"Elevation" section for why the rest of the app doesn't need to run
+elevated just because of this). If you don't want this prompt at all, set
+`"virtual_controller_enabled": false` under `settings` in `config.json`.
+
+Once accepted, press M1, M2, M3, M4, LM, RM, C, Z, Arrow, or Circle on the
+controller and check `joy.cpl` (or any gamepad tester) for a new "Vader 5
+Pro Extended" device reacting. Nothing needs to be assigned in the GUI for
+this — vendor-only buttons forward automatically.
 
 If nothing shows up: check `VaderService.exe`'s working directory for a
-`bridge/HMBridge.exe` file (confirms it was bundled), then try running
-`HMBridge.exe` directly from a terminal **as Administrator** — virtual
-device creation needs elevation, which the service doesn't currently
-request automatically (see `docs/HIDMAESTRO_INTEGRATION_PLAN.md`, Phase 3
-notes). The first line it prints on success is `ok`; anything starting
-with `error startup:` means HIDMaestro itself failed to install/create
-the device, and the rest of that line is the reason.
+`bridge/HMBridge.exe` file (confirms it was bundled). If it's there but
+you never saw a UAC prompt at all, `VirtualController` couldn't find or
+launch it — see `bridge/README.md`'s troubleshooting notes.
+
+**You do not need a `third_party/HIDMaestro` folder anywhere in this
+downloaded app folder.** That's a build-time-only checkout used inside
+the GitHub Actions run to compile `HMBridge.exe`; the published
+`HMBridge.exe` is self-contained and already has everything it needs. If
+you added one manually while troubleshooting, delete it.
 
 ## Commit messages (one per file)
 
 - `shared/config.py` — `config: add controller_button/controller_macro/combo binding types and virtual-controller settings`
 - `service/hid_interface/constants.py` — `constants: classify buttons as standard vs vendor-only for virtual-controller routing`
-- `service/mapping/virtual_controller.py` — `mapping: add VirtualController, a semantic wrapper over the HMBridge subprocess`
+- `service/mapping/virtual_controller.py` — `mapping: add VirtualController, a named-pipe wrapper over an elevated HMBridge process`
 - `service/mapping/mapper.py` — `mapper: route controller_button/controller_macro bindings and default-forward unmapped vendor-only buttons`
 - `service/mapping/macro_player.py` — `macro_player: play controller_down/controller_up actions through VirtualController, with a stuck-button safety net`
 - `service/main.py` — `service: wire optional VirtualController into mapper/macro player, dispose on shutdown`
 - `gui/scripts/macros.py` — `macros: label controller_down/controller_up actions in the action list description`
-- `bridge/HMBridge/*`, `bridge/README.md` — `bridge: add HMBridge, the HIDMaestro-facing stdin/stdout process`
+- `bridge/HMBridge/*`, `bridge/README.md` — `bridge: add HMBridge, an elevated named-pipe process bridging to the HIDMaestro SDK`
 - `build/build.py` — `build: bundle a pre-built HMBridge.exe into the packaged app when available`
 - `.github/workflows/build.yml` — `ci: add optional HMBridge build job on windows-2022, wire its output into the main build`

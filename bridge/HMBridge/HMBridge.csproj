@@ -1,7 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <!-- WinExe: no console window ever flashes up. All I/O with the
+         Python service goes over a named pipe (see Program.cs), not
+         stdin/stdout, so there's no console to lose by dropping the Exe
+         subsystem. -->
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
@@ -12,15 +16,16 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <AssemblyName>HMBridge</AssemblyName>
     <RootNamespace>VaderRemapper.HMBridge</RootNamespace>
-    <Description>Stdin/stdout bridge between the Vader Remapper Python service and the HIDMaestro SDK. See bridge/README.md.</Description>
+    <Description>Named-pipe bridge between the Vader Remapper Python service and the HIDMaestro SDK. See bridge/README.md.</Description>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Points at a local HIDMaestro checkout. The recommended layout is a
-         git submodule at <repo root>/third_party/HIDMaestro (see
-         bridge/README.md for the exact command). Adjust this relative path
-         if you place the checkout elsewhere, or replace this
-         ProjectReference with a <PackageReference> once/if HIDMaestro
+    <!-- Points at a local HIDMaestro checkout. The recommended layout is
+         a git submodule at (repo root)/third_party/HIDMaestro; see
+         bridge/README.md for the exact command. Adjust this relative
+         path if you place the checkout elsewhere, or replace this
+         ProjectReference with a PackageReference once/if HIDMaestro
          ships on NuGet. -->
     <ProjectReference Include="..\..\third_party\HIDMaestro\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
   </ItemGroup>

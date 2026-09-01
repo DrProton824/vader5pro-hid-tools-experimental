@@ -1,14 +1,27 @@
 // bridge/HMBridge/Program.cs
 //
-// Line-oriented stdin/stdout bridge between the Vader Remapper Python
-// service and the HIDMaestro SDK. This is the ONLY place in the whole
-// application that references HIDMaestro.Core directly -- see
+// Named-pipe bridge between the Vader Remapper Python service and the
+// HIDMaestro SDK. This is the ONLY place in the whole application that
+// references HIDMaestro.Core directly -- see
 // service/mapping/virtual_controller.py on the Python side, which knows
-// nothing about HIDMaestro and only ever speaks this line protocol.
+// nothing about HIDMaestro and only ever speaks the line protocol below.
+//
+// Why a named pipe and not stdin/stdout
+// ──────────────────────────────────────
+// HIDMaestro's CreateController() requires an elevated caller every time
+// it runs, not just once for driver install. VaderService.exe stays
+// unelevated, so this process has to be launched as its own elevated
+// child via ShellExecuteEx's "runas" verb -- and Windows has no way to
+// hand an *existing* process's stdio pipes to a *newly elevated* one
+// (UAC always creates a brand new process). virtual_controller.py
+// therefore creates a named pipe server before launching this exe at
+// all; this process's only job on the connection side is to connect to
+// that already-open pipe as a client and take the pipe name from argv[0].
 //
 // Protocol
 // ────────
-// One command per line on stdin, one reply per line on stdout:
+// One command per line, one reply per line, both directions over the
+// pipe:
 //
 //   press <button>              button name, e.g. "M1", "A", "LB"
 //   release <button>
@@ -19,19 +32,18 @@
 //   trigger right <value>
 //   quit
 //
-// Replies are exactly one line: "ok" or "error <message>". On successful
-// startup (profile built, controller created, driver installed if
-// needed) the process writes one "ok" line before reading its first
-// command -- VirtualController.py waits for that line to decide whether
-// the bridge is usable at all.
+// Replies are exactly one line: "ok" or "error <message>". The first
+// line this process sends after connecting is its own startup result --
+// VirtualController.py reads that to decide whether the bridge is usable
+// at all.
 //
 // Button layout
 // ─────────────
 // VaderButtons below fixes the bit order used for the raw HMButton
 // bitmask. Sticks/triggers use HidDescriptorBuilder.AddStick()/
 // AddTrigger(), and the actual HMAxis values are read back from
-// profile.Sticks[i]/profile.Triggers[i] after CreateController() --
-// the discovery pattern HIDMaestro's own doc comments recommend, so this
+// profile.Sticks[i]/profile.Triggers[i] after CreateController() -- the
+// discovery pattern HIDMaestro's own doc comments recommend, so this
 // file never hardcodes which HID usage code (X, Z, Rx, ...) ended up
 // assigned to which stick.
 //
@@ -41,6 +53,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.IO.Pipes;
 using HIDMaestro;
 
 namespace VaderRemapper.HMBridge;
@@ -54,6 +68,11 @@ internal static class Program
     // testing.
     private const ushort VirtualVid = 0x1209;
     private const ushort VirtualPid = 0x5051;
+
+    // How long to wait for the pipe server (already running by the time
+    // this process starts -- see virtual_controller.py) to accept the
+    // connection.
+    private const int ConnectTimeoutMs = 15000;
 
     // Fixed bit order for the raw HMButton bitmask (identity ButtonMap --
     // HMProfileBuilder's default -- so bit index N here IS descriptor
@@ -74,8 +93,27 @@ internal static class Program
         "Arrow", "Circle",
     };
 
-    private static int Main()
+    private static int Main(string[] args)
     {
+        if (args.Length < 1 || string.IsNullOrWhiteSpace(args[0]))
+            return 1; // no pipe name -- nothing to connect to, nowhere to report an error
+
+        string pipeName = args[0];
+
+        NamedPipeClientStream pipe;
+        try
+        {
+            pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.None);
+            pipe.Connect(ConnectTimeoutMs);
+        }
+        catch
+        {
+            return 1; // couldn't even connect -- Python side's own connect timeout already covers this
+        }
+
+        using var reader = new StreamReader(pipe);
+        using var writer = new StreamWriter(pipe) { AutoFlush = true };
+
         HMContext ctx;
         HMController controller;
         HMGamepadState state = default;
@@ -139,15 +177,14 @@ internal static class Program
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"error startup: {ex.Message}");
+            try { writer.WriteLine($"error startup: {ex.Message}"); } catch { /* pipe already gone */ }
             return 1;
         }
 
-        Console.WriteLine("ok");
-        Console.Out.Flush();
+        writer.WriteLine("ok");
 
         string? line;
-        while ((line = Console.ReadLine()) != null)
+        while ((line = reader.ReadLine()) != null)
         {
             var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length == 0)
@@ -160,59 +197,59 @@ internal static class Program
                     case "press" when parts.Length >= 2:
                         SetButton(ref state, parts[1], true);
                         controller.SubmitState(in state);
-                        Reply("ok");
+                        writer.WriteLine("ok");
                         break;
 
                     case "release" when parts.Length >= 2:
                         SetButton(ref state, parts[1], false);
                         controller.SubmitState(in state);
-                        Reply("ok");
+                        writer.WriteLine("ok");
                         break;
 
                     case "hat" when parts.Length >= 2:
                         state.Hat = ParseHat(parts[1]);
                         controller.SubmitState(in state);
-                        Reply("ok");
+                        writer.WriteLine("ok");
                         break;
 
                     case "axis" when parts.Length >= 4 && parts[1] == "left":
                         state.Axes![leftX] = float.Parse(parts[2]);
                         state.Axes![leftY] = float.Parse(parts[3]);
                         controller.SubmitState(in state);
-                        Reply("ok");
+                        writer.WriteLine("ok");
                         break;
 
                     case "axis" when parts.Length >= 4 && parts[1] == "right":
                         state.Axes![rightX] = float.Parse(parts[2]);
                         state.Axes![rightY] = float.Parse(parts[3]);
                         controller.SubmitState(in state);
-                        Reply("ok");
+                        writer.WriteLine("ok");
                         break;
 
                     case "trigger" when parts.Length >= 3 && parts[1] == "left":
                         state.Axes![leftTrigger] = float.Parse(parts[2]);
                         controller.SubmitState(in state);
-                        Reply("ok");
+                        writer.WriteLine("ok");
                         break;
 
                     case "trigger" when parts.Length >= 3 && parts[1] == "right":
                         state.Axes![rightTrigger] = float.Parse(parts[2]);
                         controller.SubmitState(in state);
-                        Reply("ok");
+                        writer.WriteLine("ok");
                         break;
 
                     case "quit":
-                        Reply("ok");
+                        writer.WriteLine("ok");
                         goto shutdown;
 
                     default:
-                        Reply($"error unrecognized command: {line}");
+                        writer.WriteLine($"error unrecognized command: {line}");
                         break;
                 }
             }
             catch (Exception ex)
             {
-                Reply($"error {ex.Message}");
+                writer.WriteLine($"error {ex.Message}");
             }
         }
 
@@ -220,12 +257,6 @@ internal static class Program
         controller.Dispose();
         ctx.Dispose();
         return 0;
-    }
-
-    private static void Reply(string message)
-    {
-        Console.WriteLine(message);
-        Console.Out.Flush();
     }
 
     private static void SetButton(ref HMGamepadState state, string name, bool pressed)
