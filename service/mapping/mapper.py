@@ -18,21 +18,28 @@ instances and fake events, without needing a controller or Windows at all.
 
 Routing
 ───────
-1. Explicit mapping present -> dispatch by binding type:
-     "keybind"           -> InputSender.press()/release(), unchanged.
-     "macro"              -> MacroPlayer.play() on press; release is a no-op.
-     "controller_button"  -> VirtualController.press()/release().
-     "controller_macro"   -> MacroPlayer.play() on press, same as "macro" —
-                              MacroPlayer decides per-action whether an
-                              action goes to the keyboard or the virtual
-                              controller (see macro_player.py).
-     "combo"               -> reserved for a future phase, currently a
-                              no-op (see docs/HIDMAESTRO_INTEGRATION_PLAN.md).
-2. No explicit mapping -> forward vendor-only buttons (buttons with no
-   native XInput/DirectInput representation — see
+1. "macro" / "controller_macro" -> MacroPlayer.play() on press; release
+   is a no-op.
+2. "controller_button" -> VirtualController.press()/release().
+3. "combo" -> reserved for a future phase, currently a no-op (see
+   docs/HIDMAESTRO_INTEGRATION_PLAN.md).
+4. "keybind" with a real value -> InputSender.press()/release(), unchanged.
+5. Everything else -- "keybind" with an empty value, or no assignment at
+   all -- forward vendor-only buttons (buttons with no native
+   XInput/DirectInput representation — see
    service/hid_interface/constants.py) to the virtual controller under
    their own name. Standard buttons are left alone; the native gamepad
    interface already delivers them to Windows.
+
+Why (4) and (5) are split on the *value*, not just presence of a binding
+─────────────────────────────────────────────────────────────────────────
+shared/config.py's load_bindings_for() always returns an entry for every
+one of the 27 MAPPABLE_BUTTONS -- an unmapped button resolves to
+{"type": "keybind", "value": ""}, not a missing key. So "does this
+button have an explicit assignment" can't be answered by checking
+whether a binding is present; it has to check whether the keybind's
+*value* is non-empty, the same way InputSender already treats an empty
+shortcut string as unmapped everywhere else in the app.
 
 `virtual_controller` is always a VirtualController instance (never None) —
 its own `is_available` flag makes every call here a safe no-op when no
@@ -98,35 +105,37 @@ class ButtonMapper:
         playback and virtual-controller I/O both run off this thread (see
         MacroPlayer and VirtualController), so neither ever blocks it.
         """
-        binding = self._bindings.get(event.button)
+        binding = self._bindings.get(event.button) or {}
+        kind = binding.get("type")
 
-        if binding is not None:
-            kind = binding.get("type")
+        if kind == "macro" or kind == "controller_macro":
+            if isinstance(event, ButtonPressed):
+                self._macro_player.play(binding.get("actions", []))
+            return  # macros play in full on press; release is a no-op
 
-            if kind == "macro" or kind == "controller_macro":
-                if isinstance(event, ButtonPressed):
-                    self._macro_player.play(binding.get("actions", []))
-                return  # macros play in full on press; release is a no-op
-
-            if kind == "controller_button":
-                target = binding.get("value", "")
-                if isinstance(event, ButtonPressed):
-                    self._virtual_controller.press(target)
-                elif isinstance(event, ButtonReleased):
-                    self._virtual_controller.release(target)
-                return
-
-            if kind == "keybind":
-                if isinstance(event, ButtonPressed):
-                    self._sender.press(event.button)
-                elif isinstance(event, ButtonReleased):
-                    self._sender.release(event.button)
-                return
-
-            # "combo" and any unrecognized type: no-op for now.
+        if kind == "controller_button":
+            target = binding.get("value", "")
+            if isinstance(event, ButtonPressed):
+                self._virtual_controller.press(target)
+            elif isinstance(event, ButtonReleased):
+                self._virtual_controller.release(target)
             return
 
-        # No explicit mapping — forward vendor-only buttons to the virtual
+        if kind == "combo":
+            return  # reserved for a future phase, currently a no-op
+
+        # kind == "keybind" (explicit, or the empty-value shape
+        # load_bindings_for() uses for "no assignment") -- only a
+        # non-empty value counts as a real, explicit assignment.
+        value = binding.get("value", "") if kind == "keybind" else ""
+        if value:
+            if isinstance(event, ButtonPressed):
+                self._sender.press(event.button)
+            elif isinstance(event, ButtonReleased):
+                self._sender.release(event.button)
+            return
+
+        # No real assignment — forward vendor-only buttons to the virtual
         # controller by default (hybrid mode). Standard buttons already
         # reach Windows through the native gamepad interface.
         if event.button in VENDOR_ONLY_BUTTONS:

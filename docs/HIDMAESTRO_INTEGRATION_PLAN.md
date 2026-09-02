@@ -11,6 +11,34 @@ New functionality is exposed either automatically (no assignment needed)
 or through the existing macro system, which already accepts arbitrary
 action dicts. No new widgets, tabs, or fields are added anywhere.
 
+## Fix in this revision — vendor-only forwarding never actually ran
+
+`service/mapping/mapper.py` had a real logic bug, not an environment
+issue: `shared/config.py`'s `load_bindings_for()` returns an entry for
+*every* one of the 27 `MAPPABLE_BUTTONS`, even unmapped ones — an
+unmapped button resolves to `{"type": "keybind", "value": ""}`, never a
+missing dict key. `ButtonMapper.handle_event()` was checking
+`if binding is not None:` to decide whether a button had an explicit
+assignment, but that's *always* true, for every button, always — so the
+"forward unmapped vendor-only buttons" branch at the bottom could never
+run, for any button, ever. `VirtualController.press()`/`release()` were
+simply never called, which is also why no UAC prompt ever appeared, even
+running the service as Administrator — it was never about elevation,
+`VirtualController` was never being asked to do anything in the first
+place.
+
+Fixed by checking the binding's actual *value* instead of its presence:
+a `"keybind"` binding only counts as a real, explicit assignment when its
+value is non-empty (matching how `InputSender` already treats an empty
+shortcut string as unmapped everywhere else in the app) — otherwise it
+falls through to the vendor-only default-forwarding path, same as a
+button with no assignment at all. Verified with an executable test
+(stubbing only the Windows-only `ctypes.windll` calls, exercising the
+real `mapper.py`): an unmapped vendor-only button now reaches
+`VirtualController`, a pre-mapped one stays on the keyboard, an unmapped
+standard button does nothing, and an explicit `controller_button`
+binding reaches `VirtualController` too.
+
 ## Since the last version of this bundle
 
 The transport between the Python service and `HMBridge.exe` changed from
