@@ -63,18 +63,21 @@ what's preinstalled on its runner images).
 
 ## 4. Try it
 
-Restart `VaderService.exe`. Within a moment you should see **one UAC
-prompt** for `HMBridge.exe` — accept it. This happens once per service
-launch (HIDMaestro's `CreateController()` requires elevation every
-session, not just for the initial driver install — see `bridge/README.md`'s
-"Elevation" section for why the rest of the app doesn't need to run
-elevated just because of this). If you don't want this prompt at all, set
+Restart `VaderService.exe`. Nothing happens yet — setup is lazy, it only
+triggers the first time a button actually needs the virtual controller
+(see `bridge/README.md`'s "Elevation" section for why). Press a
+vendor-only button that has **no explicit mapping**: on a fresh install
+that's `Arrow` or `Circle` (the default profile already binds C, Z,
+M1-M4, LM, RM to keyboard F13-F20 — see "Explicit mapping wins" below).
+
+At that first press you should see **one UAC prompt** for
+`HMBridge.exe` — accept it. From then on it's available for the rest of
+that `VaderService.exe` run; it won't ask again until the next restart.
+If you don't want this prompt at all, set
 `"virtual_controller_enabled": false` under `settings` in `config.json`.
 
-Once accepted, press M1, M2, M3, M4, LM, RM, C, Z, Arrow, or Circle on the
-controller and check `joy.cpl` (or any gamepad tester) for a new "Vader 5
-Pro Extended" device reacting. Nothing needs to be assigned in the GUI for
-this — vendor-only buttons forward automatically.
+Once accepted, check `joy.cpl` (or any gamepad tester) for a new "Vader 5
+Pro Extended" device reacting to that button.
 
 If nothing shows up: check `VaderService.exe`'s working directory for a
 `bridge/HMBridge.exe` file (confirms it was bundled). If it's there but
@@ -86,6 +89,29 @@ downloaded app folder.** That's a build-time-only checkout used inside
 the GitHub Actions run to compile `HMBridge.exe`; the published
 `HMBridge.exe` is self-contained and already has everything it needs. If
 you added one manually while troubleshooting, delete it.
+
+## Explicit mapping wins
+
+An explicit assignment (a keybind, a macro, `controller_button`,
+`controller_macro`) on a button always takes over completely — the
+default "forward unmapped vendor-only buttons automatically" behaviour
+only applies when a button has **no** assignment at all. Assign a
+keybind to M1 in the Mapping tab the normal way, and M1 stops reaching
+the virtual controller — it does whatever the keybind says instead, same
+as it always has.
+
+This matters for testing because the shipped default profile already
+assigns C, Z, M1, M2, M3, M4, LM, and RM to keyboard shortcuts F15, F16,
+F17, F18, F19, F20, F13, and F14 respectively (see `DEFAULT_PROFILE` in
+`shared/config.py`) — those 8 buttons won't auto-forward to the virtual
+pad out of the box, only `Arrow` and `Circle` will (or any button you've
+cleared to unmapped). To route one of the pre-mapped buttons to the
+virtual controller, either clear its assignment (select it on the
+Mapping tab, press Delete/Backspace) so the default forwarding applies,
+or explicitly reassign it to `controller_button` (not exposed in the GUI
+yet — see `docs/HIDMAESTRO_INTEGRATION_PLAN.md`'s Phase 4 for the planned
+path, or edit `config.json` by hand in the meantime, per the binding
+shapes documented in `shared/config.py`'s module docstring).
 
 ## Commit messages (one per file)
 

@@ -112,17 +112,34 @@ window messages, which UIPI does block cross-elevation). All of `Program.cs`'s
 actual command handling is unchanged; only the I/O layer moved from
 `Console.In`/`Console.Out` to a `NamedPipeClientStream`.
 
-**Practical effect:** once per `VaderService.exe` launch (not once per
-button press), Windows shows one UAC consent prompt for `HMBridge.exe` —
-the same prompt you'd see running it manually as Administrator. This is
-inherent to HIDMaestro's driver model; there's no way to make it silent
-while keeping the rest of the app unelevated. If you'd rather have zero
-prompts and don't mind the whole app running elevated instead — including
-switching autostart from the registry Run key to a Scheduled Task, since
-Run-key entries don't elevate — that's a bigger, separate change and
-isn't implemented here; set `"virtual_controller_enabled": false` in
-`config.json`'s settings if you'd rather just skip the prompt entirely
-and not use this feature at all.
+**Practical effect:** the first time (per `VaderService.exe` run, not per
+button press) something actually needs the virtual controller — an
+unmapped vendor-only button gets pressed, or an explicit
+`controller_button`/`controller_macro` binding fires — Windows shows one
+UAC consent prompt for `HMBridge.exe`, the same prompt you'd see running
+it manually as Administrator.
+
+This is deliberately **lazy** (triggered on first real use, not eagerly
+at service startup) specifically because of autostart: if the whole
+setup ran unconditionally the instant `VaderService.exe` started, an
+autostarted service sitting at the Windows login screen with nobody at
+the keyboard would pop a UAC dialog nobody's there to answer. Waiting
+until the feature is actually used means the prompt only ever appears at
+a moment the user is physically present — pressing a button — which is
+also the one moment someone's actually around to click "Yes." See
+`service/mapping/virtual_controller.py`'s `VirtualController` docstring
+for the implementation.
+
+This is still inherent to HIDMaestro's driver model in the sense that
+*some* per-session prompt is unavoidable while `VaderService.exe` itself
+stays unelevated — laziness just controls *when* it happens, not
+*whether*. If you'd rather have zero prompts ever and don't mind the
+whole app running elevated instead — including switching autostart from
+the registry Run key to a Scheduled Task with "run with highest
+privileges," since Run-key entries can't launch pre-elevated — that's a
+bigger, separate change and isn't implemented here; set
+`"virtual_controller_enabled": false` in `config.json`'s settings if
+you'd rather just skip the feature (and any prompt) entirely.
 
 ## Things worth double-checking once you have a build
 

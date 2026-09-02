@@ -40,15 +40,22 @@ pipe (the common, supported direction) — only in-process kernel objects
 like window messages are blocked cross-elevation by UIPI, not named
 pipes.
 
-Practical effect: once per VaderService.exe start (not once per button
-press), Windows shows one UAC consent prompt for HMBridge.exe, the same
-one you'd see running it manually as Administrator. If the user declines
-it, or `virtual_controller_enabled` is False, or the bridge simply isn't
-present, `is_available` stays False and everything below is a no-op —
-the rest of the app is completely unaffected either way.
+Practical effect: the first time (per VaderService.exe run, not per
+button press) something actually routes to the virtual controller,
+Windows shows one UAC consent prompt for HMBridge.exe, the same one
+you'd see running it manually as Administrator. Setup is lazy —
+triggered on first real use, not at service startup — specifically so an
+autostarted service sitting at the login screen never pops an
+unattended UAC dialog nobody's there to answer; see
+VirtualController.__doc__ below for why that matters. If the user
+declines the prompt, or `virtual_controller_enabled` is False, or the
+bridge simply isn't present, `is_available` stays False and everything
+below is a no-op — the rest of the app is completely unaffected either
+way.
 
-Setup happens on a background thread so VaderService.exe's own startup
-(tray icon, hotkeys, ...) never waits on the UAC prompt being answered.
+Setup runs on a background thread so whatever triggered it (a HID button
+event, on the reader thread) never blocks waiting on the UAC prompt being
+answered.
 
 Protocol
 ────────
@@ -211,7 +218,19 @@ class VirtualController:
     bridge simply not being present.
 
     Setup (pipe creation, elevated launch, UAC wait, HIDMaestro startup)
-    happens on a background thread; the constructor returns immediately.
+    is lazy — it doesn't happen in the constructor at all, and doesn't
+    happen at VaderService.exe startup either. It happens on a background
+    thread the first time any button actually routes to this class
+    (either an explicit controller_button/controller_macro binding, or
+    the default vendor-only-button forwarding in ButtonMapper — see that
+    module). Practical effect: the one UAC prompt HMBridge needs (see
+    bridge/README.md's "Elevation" section) only appears the first time
+    it's actually needed each session, not unconditionally on every
+    launch. This matters most for autostart: a service starting silently
+    at login never pops a UAC dialog nobody's there to answer — nothing
+    prompts until the user is physically at the keyboard pressing a
+    button that needs it, which is also the one moment someone's actually
+    around to click "Yes."
     """
 
     def __init__(self, *, enabled: bool = True) -> None:
@@ -220,42 +239,62 @@ class VirtualController:
         self._lock = threading.Lock()
         self._available = False
         self._closing = False
-        if enabled:
-            threading.Thread(target=self._start, name="VirtualControllerSetup", daemon=True).start()
+        self._enabled = enabled
+        self._start_requested = False
+
+    def _ensure_started(self) -> None:
+        """Kick off setup on first use, exactly once. Cheap to call from
+        every hot-path method below -- after the first call this is just
+        one `if` and one lock-free attribute read."""
+        if self._start_requested or not self._enabled or self._closing:
+            return
+        with self._lock:
+            if self._start_requested:
+                return
+            self._start_requested = True
+        threading.Thread(target=self._start, name="VirtualControllerSetup", daemon=True).start()
 
     # ── Public API ────────────────────────────────────────────────────────
 
     @property
     def is_available(self) -> bool:
         """True once HMBridge has connected and reported successful
-        startup. False before that finishes, if the user declined the UAC
-        prompt, if HIDMaestro itself failed to start, or after the pipe
-        breaks."""
+        startup. False before setup has even been triggered (nothing has
+        used this instance yet), while setup is still in progress, if the
+        user declined the UAC prompt, if HIDMaestro itself failed to
+        start, or after the pipe breaks."""
         return self._available
 
     def press(self, button: str) -> None:
         if button:
+            self._ensure_started()
             self._send(f"press {button}")
 
     def release(self, button: str) -> None:
         if button:
+            self._ensure_started()
             self._send(f"release {button}")
 
     def set_dpad(self, direction: str) -> None:
         """direction: "centered" or one of the eight compass abbreviations
         (n, ne, e, se, s, sw, w, nw)."""
+        self._ensure_started()
         self._send(f"hat {direction}")
 
     def set_left_stick(self, x: float, y: float) -> None:
+        self._ensure_started()
         self._send(f"axis left {x:.4f} {y:.4f}")
 
     def set_right_stick(self, x: float, y: float) -> None:
+        self._ensure_started()
         self._send(f"axis right {x:.4f} {y:.4f}")
 
     def set_left_trigger(self, value: float) -> None:
+        self._ensure_started()
         self._send(f"trigger left {value:.4f}")
 
     def set_right_trigger(self, value: float) -> None:
+        self._ensure_started()
         self._send(f"trigger right {value:.4f}")
 
     def close(self) -> None:
