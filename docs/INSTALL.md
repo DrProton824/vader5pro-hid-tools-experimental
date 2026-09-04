@@ -70,19 +70,27 @@ vendor-only button that has **no explicit mapping**: on a fresh install
 that's `Arrow` or `Circle` (the default profile already binds C, Z,
 M1-M4, LM, RM to keyboard F13-F20 — see "Explicit mapping wins" below).
 
-At that first press you should see **one UAC prompt** for
-`HMBridge.exe` — accept it. From then on it's available for the rest of
-that `VaderService.exe` run; it won't ask again until the next restart.
-If you don't want this prompt at all, set
-`"virtual_controller_enabled": false` under `settings` in `config.json`.
+You should see a UAC prompt for `HMBridge.exe` at that first press — this
+is still being diagnosed as of this bundle (see
+`docs/HIDMAESTRO_INTEGRATION_PLAN.md`'s "Diagnostic round" note), so if
+nothing visibly happens, that's expected right now and the next step is
+to check the logs, not to assume something's broken on your end.
 
-Once accepted, check `joy.cpl` (or any gamepad tester) for a new "Vader 5
-Pro Extended" device reacting to that button.
+Check both log files (see `bridge/README.md`'s "Diagnosing a failed run"
+section for exactly what each line means):
 
-If nothing shows up: check `VaderService.exe`'s working directory for a
-`bridge/HMBridge.exe` file (confirms it was bundled). If it's there but
-you never saw a UAC prompt at all, `VirtualController` couldn't find or
-launch it — see `bridge/README.md`'s troubleshooting notes.
+- `bridge_debug.log`, next to `VaderService.exe`
+- `HMBridge_debug.log`, next to `HMBridge.exe` (only appears once
+  `HMBridge.exe` has actually run at least once)
+
+The line to look for is `Running elevated: True` or `False` near the top
+of `HMBridge_debug.log` — that's the direct answer to whether elevation
+actually happened, independent of whether a visible prompt appeared.
+
+If it does work: check `joy.cpl` (or any gamepad tester) for a new
+"Vader 5 Pro Extended" device reacting to that button, and see
+`bridge/README.md`'s button-numbering table if the tester just shows
+generic "Button N" labels — that part's expected, not a bug.
 
 **You do not need a `third_party/HIDMaestro` folder anywhere in this
 downloaded app folder.** That's a build-time-only checkout used inside

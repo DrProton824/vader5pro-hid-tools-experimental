@@ -86,6 +86,69 @@ from source, so this output location is picked up automatically. Delete
 `third_party/HIDMaestro` once the build succeeds — you don't need to keep
 it around, and you don't need to ship it (see above).
 
+## Diagnosing a failed run
+
+Both sides now log to a plain text file, best-effort, on by default (this
+is new/unverified code — worth over-logging for now):
+
+- **Python side:** `bridge_debug.log`, next to `VaderService.exe` (or the
+  repo root when running from source).
+- **`HMBridge.exe` side:** `HMBridge_debug.log`, next to `HMBridge.exe`
+  itself.
+
+The single most useful line in `HMBridge_debug.log` is `Running elevated:
+True`/`False` — logged right at startup, before anything else happens.
+This answers directly whether the `ShellExecuteEx("runas")` call on the
+Python side actually elevated the process, which is otherwise impossible
+to tell from Task Manager or Device Manager alone. If it says `False`,
+everything downstream of that (driver install, controller creation) is
+running without the privilege HIDMaestro's own source says it needs, and
+that's the thing to chase — not a Python-side bug.
+
+If HMBridge exits repeatedly ("comes and goes" in Task Manager),
+`bridge_debug.log` will show one full attempt-cycle per launch (`Found
+bridge exe...` through either `Virtual controller is now available` or
+an early `return`), so multiple cycles show up as multiple such blocks
+with fresh timestamps — useful for telling apart "the Python side is
+genuinely retrying" from "something external (antivirus, a crash) is
+killing an otherwise-fine process."
+
+## Why the buttons show up as "Button 1".."Button 21" in generic testers
+
+This is a HID protocol limitation, not something fixable by naming things
+differently in the HIDMaestro profile. The HID Button usage page has no
+mechanism for a generic button to carry a string label — device string
+descriptors only cover things like the product/manufacturer name, not
+individual buttons — so every generic HID gamepad, from every
+manufacturer, shows up as numbered buttons in Windows' Game Controllers
+panel and most gamepad testers. Real gamepads only display "A"/"B"/"X"/"Y"
+in specific games because that game (or Steam Input, or similar) has its
+own hardcoded VID/PID → label table, entirely on the *consuming*
+application's side — the device itself never transmits button names.
+
+What *is* fixed and reliable is the **order** — bit index *N* in
+`Program.cs`'s `VaderButtons` array always maps to the same "Button N+1"
+in a generic tester, every run, since the array order never changes at
+runtime:
+
+| Button # | Vader name | Button # | Vader name | Button # | Vader name |
+|---|---|---|---|---|---|
+| 1 | A | 8 | START | 15 | M4 |
+| 2 | B | 9 | LS | 16 | LM |
+| 3 | X | 10 | RS | 17 | RM |
+| 4 | Y | 11 | HOME | 18 | C |
+| 5 | LB | 12 | M1 | 19 | Z |
+| 6 | RB | 13 | M2 | 20 | Arrow |
+| 7 | SELECT | 14 | M3 | 21 | Circle |
+
+If you want real semantic names to show up generically (in any game, any
+tester, without a per-app lookup table), the only path is emulating an
+actual Xbox controller via XInput instead of a generic HID gamepad — a
+different technology (e.g. ViGEmBus's virtual Xbox 360 controller, which
+is already on `PROJECT.md`'s nice-to-have list) rather than a HIDMaestro
+profile tweak. That would be a separate, substantial piece of work, not
+something to bolt onto this bridge.
+
 ## Elevation
 
 `CreateController()` requires an elevated (administrator) caller —

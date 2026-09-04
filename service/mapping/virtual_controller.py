@@ -96,6 +96,35 @@ from typing import Optional
 BRIDGE_EXE_NAME = "HMBridge.exe"
 PIPE_NAME = "VaderRemapperHMBridge"
 
+# ── Debug logging ────────────────────────────────────────────────────────────
+# Off by default in most of this codebase (see rawinput_reader.py's
+# DEBUG_FILE_LOGGING flag) but ON by default here, deliberately: this is
+# the newest, least-tested part of the app, elevation/pipe/driver-binding
+# failures are otherwise completely silent, and the whole point of this
+# file is to make "why didn't it work" answerable from a log instead of
+# guesswork. Written next to the running exe (or repo root from source),
+# best-effort -- a logging failure never affects real behaviour.
+def _log_path() -> pathlib.Path:
+    try:
+        if getattr(sys, "frozen", False):
+            base = pathlib.Path(sys.executable).resolve().parent
+        else:
+            base = pathlib.Path(__file__).resolve().parents[2]
+    except Exception:
+        base = pathlib.Path(".")
+    return base / "bridge_debug.log"
+
+
+def _log(message: str) -> None:
+    try:
+        import datetime
+        line = f"{datetime.datetime.now():%H:%M:%S} [VirtualController] {message}"
+        with open(_log_path(), "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except Exception:
+        pass
+
+
 # Overrides bridge discovery entirely -- convenient for local development
 # when running the service from source against a bridge built somewhere
 # outside the repo tree.
@@ -307,6 +336,7 @@ class VirtualController:
         self._available = False
 
         if pipe is not None:
+            _log("Closing: sending quit and releasing the pipe")
             try:
                 self._write_line(pipe, "quit")
             except Exception:
@@ -331,8 +361,13 @@ class VirtualController:
 
     def _start(self) -> None:
         exe = _find_bridge_exe()
-        if exe is None or self._closing:
+        if exe is None:
+            _log("HMBridge.exe not found -- nothing to launch. Checked next to the "
+                 "service exe, its bridge/ subfolder, and (from source) bridge/HMBridge/**.")
             return
+        if self._closing:
+            return
+        _log(f"Found bridge exe at {exe}")
 
         pipe = kernel32.CreateNamedPipeW(
             f"\\\\.\\pipe\\{PIPE_NAME}",
@@ -344,15 +379,25 @@ class VirtualController:
             0,
             None,
         )
-        if pipe == INVALID_HANDLE_VALUE or self._closing:
+        if pipe == INVALID_HANDLE_VALUE:
+            _log(f"CreateNamedPipeW failed, GetLastError={kernel32.GetLastError()}")
             return
+        if self._closing:
+            kernel32.CloseHandle(pipe)
+            return
+        _log("Named pipe created, launching HMBridge.exe elevated...")
 
         process_handle = self._launch_elevated(exe)
         if process_handle is None:
             kernel32.CloseHandle(pipe)
             return
 
+        _log("ShellExecuteExW succeeded, waiting for HMBridge.exe to connect to the pipe...")
         if not self._wait_for_connect(pipe):
+            _log(f"Timed out after {CONNECT_TIMEOUT_SECONDS:.0f}s waiting for HMBridge.exe "
+                 "to connect. Either the UAC prompt is still waiting for a response, or "
+                 "HMBridge.exe exited before connecting -- check HMBridge_debug.log next "
+                 "to HMBridge.exe if one exists.")
             kernel32.CloseHandle(pipe)
             kernel32.TerminateProcess(process_handle, 0)
             kernel32.CloseHandle(process_handle)
@@ -364,6 +409,7 @@ class VirtualController:
             return
 
         startup_reply = self._read_line(pipe)
+        _log(f"HMBridge.exe startup reply: {startup_reply!r}")
         if not startup_reply.startswith("ok"):
             kernel32.CloseHandle(pipe)
             kernel32.TerminateProcess(process_handle, 0)
@@ -373,20 +419,45 @@ class VirtualController:
         self._pipe = pipe
         self._process_handle = process_handle
         self._available = True
+        _log("Virtual controller is now available.")
 
     def _launch_elevated(self, exe: pathlib.Path) -> Optional[int]:
+        # Keep explicit local references to every string passed into the
+        # struct -- ctypes' automatic str -> LPCWSTR conversion on a
+        # Structure field is normally kept alive via the structure's own
+        # internal bookkeeping, but there is no reason to rely on that
+        # implicitly when the cost of being explicit is three local
+        # variables.
+        verb = "runas"
+        file_path = str(exe)
+        parameters = PIPE_NAME
+        directory = str(exe.parent)
+
         info = SHELLEXECUTEINFOW()
         info.cbSize = ctypes.sizeof(SHELLEXECUTEINFOW)
-        info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI
+        # SEE_MASK_FLAG_NO_UI deliberately omitted while this is being
+        # diagnosed: letting Windows show its own error dialog on failure
+        # (wrong path, no handler, ...) is more useful right now than a
+        # silent failure with only a numeric GetLastError() code to go on.
+        info.fMask = SEE_MASK_NOCLOSEPROCESS
         info.hwnd = None
-        info.lpVerb = "runas"
-        info.lpFile = str(exe)
-        info.lpParameters = PIPE_NAME
-        info.lpDirectory = str(exe.parent)
+        info.lpVerb = verb
+        info.lpFile = file_path
+        info.lpParameters = parameters
+        info.lpDirectory = directory
         info.nShow = SW_HIDE
 
-        if not shell32.ShellExecuteExW(ctypes.byref(info)) or not info.hProcess:
-            return None  # bridge not found, elevation declined, or launch failed
+        succeeded = bool(shell32.ShellExecuteExW(ctypes.byref(info)))
+        if not succeeded:
+            _log(f"ShellExecuteExW returned failure, GetLastError={kernel32.GetLastError()}")
+            return None
+        if not info.hProcess:
+            # ShellExecuteExW can report success (nonzero return) while
+            # still leaving hProcess null for certain verbs/targets --
+            # treat that the same as failure, there's no process to track.
+            _log("ShellExecuteExW reported success but returned no process handle")
+            return None
+        _log(f"ShellExecuteExW succeeded, hProcess={info.hProcess}")
         return info.hProcess
 
     def _wait_for_connect(self, pipe: int) -> bool:
@@ -432,6 +503,11 @@ class VirtualController:
                 return
             try:
                 self._write_line(self._pipe, line)
-                self._read_line(self._pipe)  # discard "ok"/"error ..."
-            except OSError:
+                reply = self._read_line(self._pipe)
+                if reply.startswith("error"):
+                    _log(f"{line!r} -> {reply!r}")
+            except OSError as exc:
+                _log(f"Pipe I/O failed on {line!r} ({exc}) -- marking unavailable "
+                     "for the rest of this session.")
                 self._available = False
+

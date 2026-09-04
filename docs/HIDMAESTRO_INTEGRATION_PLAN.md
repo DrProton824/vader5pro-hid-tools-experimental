@@ -39,6 +39,31 @@ real `mapper.py`): an unmapped vendor-only button now reaches
 standard button does nothing, and an explicit `controller_button`
 binding reaches `VirtualController` too.
 
+## Diagnostic round — logging added, root cause not yet confirmed
+
+Testing surfaced three behaviours that don't have a confirmed
+explanation yet: `HMBridge.exe` cycling in Task Manager instead of
+staying up, no visible UAC prompt despite requesting elevation, and the
+virtual gamepad appearing with no driver bound until a manual "Update
+driver." The strongest working theory, based on reading HIDMaestro's own
+internals docs (`docs/INTERNALS.md`, `HMContext.cs`'s doc comments:
+`InstallDriver()` "Requires admin"; multiple test-probe comments
+"Requires elevation (CreateController)") is that `HMBridge.exe` is
+running **unelevated** despite the `ShellExecuteEx("runas")` call, which
+would explain all three symptoms as one root cause rather than three
+separate bugs. This is not yet confirmed — it needs a real log to be
+sure.
+
+Both sides now log to a plain text file by default (see
+`bridge/README.md`'s "Diagnosing a failed run" section), and
+`HMBridge.exe` checks and logs its own actual elevation status
+(`WindowsPrincipal(...).IsInRole(WindowsBuiltInRole.Administrator)`) as
+the very first thing it does — the one log line that resolves the
+ambiguity directly. Also removed `SEE_MASK_FLAG_NO_UI` from the
+`ShellExecuteEx` call so any OS-level launch failure shows its own error
+dialog instead of failing completely silently while this is being
+diagnosed.
+
 ## Since the last version of this bundle
 
 The transport between the Python service and `HMBridge.exe` changed from

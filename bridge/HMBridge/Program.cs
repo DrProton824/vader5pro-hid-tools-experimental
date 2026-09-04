@@ -74,6 +74,21 @@ internal static class Program
     // connection.
     private const int ConnectTimeoutMs = 15000;
 
+    // Written next to this exe, best-effort. See virtual_controller.py's
+    // matching bridge_debug.log on the Python side -- between the two,
+    // a failed run should be diagnosable without guesswork.
+    private static readonly string LogPath = Path.Combine(
+        AppContext.BaseDirectory, "HMBridge_debug.log");
+
+    private static void Log(string message)
+    {
+        try
+        {
+            File.AppendAllText(LogPath, $"{DateTime.Now:HH:mm:ss} {message}{Environment.NewLine}");
+        }
+        catch { /* best-effort -- logging must never be why this process crashes */ }
+    }
+
     // Fixed bit order for the raw HMButton bitmask (identity ButtonMap --
     // HMProfileBuilder's default -- so bit index N here IS descriptor
     // button N). Everything except the 4 D-pad directions and the 2
@@ -95,8 +110,31 @@ internal static class Program
 
     private static int Main(string[] args)
     {
+        Log($"Starting. args={string.Join(' ', args)}");
+
+        bool isElevated;
+        try
+        {
+            using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+            var principal = new System.Security.Principal.WindowsPrincipal(identity);
+            isElevated = principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+        }
+        catch (Exception ex)
+        {
+            Log($"Could not determine elevation status: {ex.Message}");
+            isElevated = false;
+        }
+        // This is the single most important line in this log file: it
+        // answers definitively whether ShellExecuteEx's "runas" verb
+        // actually elevated this process, which is otherwise impossible
+        // to tell from the Python side or from Task Manager alone.
+        Log($"Running elevated: {isElevated}");
+
         if (args.Length < 1 || string.IsNullOrWhiteSpace(args[0]))
-            return 1; // no pipe name -- nothing to connect to, nowhere to report an error
+        {
+            Log("No pipe name given on the command line -- exiting.");
+            return 1; // nothing to connect to, nowhere to report an error
+        }
 
         string pipeName = args[0];
 
@@ -105,10 +143,12 @@ internal static class Program
         {
             pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.None);
             pipe.Connect(ConnectTimeoutMs);
+            Log("Connected to pipe.");
         }
-        catch
+        catch (Exception ex)
         {
-            return 1; // couldn't even connect -- Python side's own connect timeout already covers this
+            Log($"Failed to connect to pipe '{pipeName}': {ex.Message}");
+            return 1; // Python side's own connect timeout already covers this
         }
 
         using var reader = new StreamReader(pipe);
@@ -124,8 +164,13 @@ internal static class Program
         try
         {
             ctx = new HMContext();
+            Log($"IsDriverInstalled: {ctx.IsDriverInstalled}");
             if (!ctx.IsDriverInstalled)
+            {
+                Log("Calling InstallDriver()...");
                 ctx.InstallDriver();
+                Log("InstallDriver() returned without throwing.");
+            }
 
             var descriptor = new HidDescriptorBuilder()
                 .Gamepad()
@@ -148,7 +193,9 @@ internal static class Program
                 .FromDescriptorBuilder(descriptor)
                 .Build();
 
+            Log("Calling CreateController()...");
             controller = ctx.CreateController(profile);
+            Log("CreateController() succeeded.");
 
             leftX = leftY = rightX = rightY = leftTrigger = rightTrigger = HMAxis.None;
 
@@ -177,11 +224,17 @@ internal static class Program
         }
         catch (Exception ex)
         {
+            Log($"Startup failed: {ex}");
             try { writer.WriteLine($"error startup: {ex.Message}"); } catch { /* pipe already gone */ }
             return 1;
         }
 
-        writer.WriteLine("ok");
+        // "elevated=" is appended so the Python-side log captures the
+        // same answer without needing to cross-reference this file --
+        // VirtualController._start() only checks the reply starts with
+        // "ok", so this is purely informational, not a protocol change.
+        writer.WriteLine($"ok elevated={isElevated}");
+        Log("Startup complete, entering command loop.");
 
         string? line;
         while ((line = reader.ReadLine()) != null)
@@ -249,11 +302,15 @@ internal static class Program
             }
             catch (Exception ex)
             {
+                Log($"Command '{line}' failed: {ex.Message}");
                 writer.WriteLine($"error {ex.Message}");
             }
         }
 
+        Log("Pipe closed by the other end (read returned null) -- shutting down.");
+
     shutdown:
+        Log("Shutting down.");
         controller.Dispose();
         ctx.Dispose();
         return 0;
